@@ -1,52 +1,67 @@
-# Neothera Assignment — Thought Process Note
+# Neothera Assignment Note
 
-**Vinayak Paka** | April 2026
-**Live prototype:** [neothera-checkin-koty.vercel.app/app](https://neothera-checkin-koty.vercel.app/app)
-**Source code:** [github.com/VinayakPaka/Neothera-Checkin](https://github.com/VinayakPaka/Neothera-Checkin)
+## What I chose
 
----
+I chose the `customer-side adherence` problem first.
 
-## Problem chosen: Customer-side adherence
+My reasoning was that Neothera's downstream pattern detection only becomes useful if users log consistently enough for the data to mean something. So I focused on reducing the friction of daily logging instead of building analytics on top of incomplete inputs.
 
-I picked the adherence problem because Neothera's downstream pattern detection only becomes useful if users log consistently enough for the data to mean something. The highest-leverage move is to make daily logging feel effortless — not to build analytics on top of incomplete inputs.
+## Intervention
 
-## The intervention: AI-assisted daily check-in
+I designed a `multimodal AI daily check-in`.
 
-Instead of asking users to fill a structured form every day, the prototype lets them log naturally — via a quick text message, a meal photo, a voice note, or a skin selfie — and the AI converts that into a structured acne log (food, skincare, skin symptoms, lifestyle signals) with one-tap confirmation. The entire flow takes under 30 seconds.
+Instead of asking users to fill a structured form every day, the product lets them log naturally:
+
+- quick text
+- meal photo
+- voice note
+- optional skin selfie
+
+The system then converts that raw input into a structured acne log covering:
+
+- food
+- skincare
+- skin symptoms
+- lifestyle signals
+- adherence status
+
+The user only needs to review and confirm it.
 
 ## What I prioritized
 
-I optimized for the shortest path from **reminder → confirmed log**:
+I prioritized the shortest path from `reminder` to `confirmed log`.
 
-- **Branded landing page** with product framing and clear CTA
-- **Auth flow** (Supabase SSR) — real login/signup with session-aware route protection
-- **Multimodal capture** — text, voice recording, meal photos (multi-image), skin selfies (multi-image) with inline previews
-- **AI parsing** — OpenAI converts raw inputs into structured fields with a confidence score
-- **One-tap confirmation** — user reviews the AI summary and confirms in a single click
-- **"Same as yesterday" shortcut** — for days when nothing changed, reducing logging to literally one tap
-- **History timeline** with saved entries, streaks, and a lightweight pattern teaser
-- **Browser push notifications** — real-time reminders at the user's preferred time, no email dependency
-- **Demo-safe fallbacks** — the flow works even without API keys, so the prototype is always reviewable
+The product includes:
 
-## Tech stack and reasoning
+- a branded landing page and auth entry flow
+- a home screen with reminder and progress context
+- a `same as yesterday` shortcut for repeated days
+- multimodal capture
+- AI parsing into structured fields
+- one-tap confirmation
+- saved history and a lightweight pattern teaser
 
-| Choice | Why |
-|--------|-----|
-| **Next.js 15 (App Router)** | Full-stack in one codebase — SSR pages, API routes, and middleware all in one place. Fast to ship. |
-| **Supabase** | Postgres + Auth + Storage in one service. SSR cookie-based auth keeps sessions secure without client-side token juggling. |
-| **OpenAI (GPT-4.1-mini + GPT-4o-mini-transcribe)** | Handles both voice transcription and structured parsing from natural language. Cheap and fast enough for real-time use. |
-| **Web Push (VAPID)** | Free, instant browser notifications — no SMS/email cost, no third-party dependency. Users opt in with one click. |
+I intentionally did not build a full analytics suite, treatment dashboard, or diagnosis engine because the assignment asked for one high-leverage intervention inside the tracking flow.
 
-I chose this stack because every piece is production-grade but takes minutes to wire up. No over-engineering — just the fastest path to a working, deployable product.
+## Tech stack
+
+I used:
+
+- `Next.js` for a fast full-stack product surface
+- `Supabase` for persistence and media storage
+- `OpenAI` for transcription and multimodal parsing
+
+I also added demo-safe fallbacks so the flow still works even when external keys are missing during review.
 
 ## How this evolves into production
 
-This prototype is intentionally scoped to one feature, but it's built on real infrastructure. The natural next steps:
+The next step would be to connect this flow to:
 
-1. **WhatsApp / mobile push** — extend reminders beyond browser notifications for mobile-first users
-2. **Richer image parsing** — use vision models to detect food items from meal photos and assess skin condition from selfies
-3. **Trigger detection** — correlate repeated logs across days (e.g., dairy on Day N → flare on Day N+1) to surface actionable patterns
-4. **Correction learning** — track what users edit after AI parsing to improve accuracy over time
-5. **Internal tools** — give dermatologists and CX teams a view into user logs for consults and program support
+- WhatsApp or push reminders
+- user-level authentication
+- richer image and voice parsing
+- better confidence handling and correction loops
+- trigger detection across repeated logs
+- internal tools for dermat consults and CX teams
 
-The same adherence flow becomes the data engine for Neothera's longer-term pattern detection and personalized treatment — better logging today means better insights tomorrow.
+In production, the same adherence flow becomes the data engine for Neothera's longer-term pattern detection and personalized treatment support.
