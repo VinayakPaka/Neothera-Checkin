@@ -1,6 +1,7 @@
 "use client";
 
-import { ChangeEvent, useEffect, useState, useTransition } from "react";
+import Link from "next/link";
+import { ChangeEvent, Dispatch, SetStateAction, useEffect, useMemo, useState, useTransition } from "react";
 import { VoiceRecorder } from "@/components/voice-recorder";
 import {
   AttachmentPayload,
@@ -95,35 +96,121 @@ function buildInsightTeaser(history: DailyEntry[], fallback: string) {
   return fallback;
 }
 
+function appendUniqueFiles(current: File[], nextFiles: File[]) {
+  const seen = new Set(current.map((file) => `${file.name}-${file.size}-${file.lastModified}`));
+  const additions = nextFiles.filter((file) => {
+    const key = `${file.name}-${file.size}-${file.lastModified}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+
+  return [...current, ...additions];
+}
+
+function urlBase64ToUint8Array(base64String: string) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+
+  for (let i = 0; i < rawData.length; i += 1) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+
+  return outputArray;
+}
+
 export function TrackerApp({ initialData }: TrackerAppProps) {
   const [dashboard, setDashboard] = useState(initialData);
   const [step, setStep] = useState<AppStep>("home");
   const [note, setNote] = useState("");
   const [mealCaption, setMealCaption] = useState("");
   const [selfieCaption, setSelfieCaption] = useState("");
-  const [mealPhoto, setMealPhoto] = useState<File | null>(null);
-  const [skinSelfie, setSkinSelfie] = useState<File | null>(null);
+  const [mealPhotos, setMealPhotos] = useState<File[]>([]);
+  const [skinSelfies, setSkinSelfies] = useState<File[]>([]);
   const [voiceNote, setVoiceNote] = useState<File | null>(null);
   const [transcript, setTranscript] = useState("");
   const [summary, setSummary] = useState<StructuredLog | null>(null);
   const [inputModes, setInputModes] = useState<DailyEntry["inputModes"]>([]);
-  const [busyAction, setBusyAction] = useState<"parse" | "save" | "reminder" | null>(null);
+  const [busyAction, setBusyAction] = useState<"parse" | "save" | "reminder" | "test-reminder" | "push" | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reminderTime, setReminderTime] = useState(initialData.reminderPreference.preferredTime);
   const [lastSavedEntry, setLastSavedEntry] = useState<DailyEntry | undefined>(initialData.todayEntry);
   const [isPending, startTransition] = useTransition();
+  const [pushSupported, setPushSupported] = useState(false);
+  const [pushPermission, setPushPermission] = useState<NotificationPermission>("default");
+  const [pushSubscribed, setPushSubscribed] = useState(false);
 
   const fallbackYesterdayEntry = dashboard.history.find((entry) => entry.entryDate !== dashboard.todayDate);
+  const mealPhotoPreviews = useMemo(
+    () =>
+      mealPhotos.map((photo) => ({
+        key: `${photo.name}-${photo.lastModified}`,
+        name: photo.name,
+        url: URL.createObjectURL(photo)
+      })),
+    [mealPhotos]
+  );
+  const skinSelfiePreviews = useMemo(
+    () =>
+      skinSelfies.map((photo) => ({
+        key: `${photo.name}-${photo.lastModified}`,
+        name: photo.name,
+        url: URL.createObjectURL(photo)
+      })),
+    [skinSelfies]
+  );
 
   useEffect(() => {
     setReminderTime(dashboard.reminderPreference.preferredTime);
   }, [dashboard.reminderPreference.preferredTime]);
 
+  useEffect(() => {
+    async function initPushState() {
+      if (typeof window === "undefined") {
+        return;
+      }
+
+      const supportsPush = "serviceWorker" in navigator && "PushManager" in window;
+      setPushSupported(supportsPush);
+      setPushPermission(Notification.permission);
+
+      if (!supportsPush) {
+        return;
+      }
+
+      try {
+        const registration = await navigator.serviceWorker.register("/sw.js");
+        const existingSubscription = await registration.pushManager.getSubscription();
+        setPushSubscribed(Boolean(existingSubscription));
+      } catch {
+        setPushSubscribed(false);
+      }
+    }
+
+    void initPushState();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      mealPhotoPreviews.forEach((preview) => URL.revokeObjectURL(preview.url));
+    };
+  }, [mealPhotoPreviews]);
+
+  useEffect(() => {
+    return () => {
+      skinSelfiePreviews.forEach((preview) => URL.revokeObjectURL(preview.url));
+    };
+  }, [skinSelfiePreviews]);
+
   async function buildAttachments(): Promise<AttachmentPayload[]> {
     const attachments: AttachmentPayload[] = [];
 
-    if (mealPhoto) {
+    for (const mealPhoto of mealPhotos) {
       attachments.push({
         kind: "meal_photo",
         name: mealPhoto.name,
@@ -142,7 +229,7 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
       });
     }
 
-    if (skinSelfie) {
+    for (const skinSelfie of skinSelfies) {
       attachments.push({
         kind: "skin_selfie",
         name: skinSelfie.name,
@@ -156,19 +243,32 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
   }
 
   function resetDraft() {
+    setMealPhotos([]);
+    setSkinSelfies([]);
     setNote("");
     setMealCaption("");
     setSelfieCaption("");
-    setMealPhoto(null);
-    setSkinSelfie(null);
+    setMealPhotos([]);
+    setSkinSelfies([]);
     setVoiceNote(null);
     setTranscript("");
     setSummary(null);
     setInputModes([]);
   }
 
+  function goToLogin() {
+    if (typeof window !== "undefined") {
+      window.location.href = "/auth?mode=login";
+    }
+  }
+
   async function refreshDashboard() {
     const response = await fetch("/api/dashboard");
+    if (response.status === 401) {
+      goToLogin();
+      throw new Error("Session expired.");
+    }
+
     const nextDashboard = (await response.json()) as DashboardData;
     startTransition(() => {
       setDashboard(nextDashboard);
@@ -177,7 +277,7 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
   }
 
   async function handleParse() {
-    if (!note.trim() && !mealPhoto && !voiceNote && !skinSelfie) {
+    if (!note.trim() && mealPhotos.length === 0 && !voiceNote && skinSelfies.length === 0) {
       setError("Add a quick note, voice memo, meal photo, or selfie before parsing.");
       return;
     }
@@ -203,6 +303,11 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
           attachments
         })
       });
+
+      if (response.status === 401) {
+        goToLogin();
+        return;
+      }
 
       const data = (await response.json()) as ParseResponsePayload & { error?: string };
       if (!response.ok || data.error) {
@@ -249,6 +354,11 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
         body: JSON.stringify(payload)
       });
 
+      if (response.status === 401) {
+        goToLogin();
+        return;
+      }
+
       const data = (await response.json()) as DashboardData & { error?: string };
       if (!response.ok || data.error) {
         throw new Error(data.error || "Saving failed.");
@@ -283,6 +393,11 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
         })
       });
 
+      if (response.status === 401) {
+        goToLogin();
+        return;
+      }
+
       const data = (await response.json()) as DashboardData & { error?: string };
       if (!response.ok || data.error) {
         throw new Error(data.error || "Could not update reminder.");
@@ -294,6 +409,106 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
       });
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Could not update reminder.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleSendTestReminder() {
+    try {
+      setError(null);
+      setBusyAction("test-reminder");
+      const response = await fetch("/api/preferences/test-reminder", {
+        method: "POST"
+      });
+
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Could not send test reminder.");
+      }
+
+      setBanner("Test notification sent.");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Could not send test reminder.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleEnablePushNotifications() {
+    if (!pushSupported) {
+      setError("Push notifications are not supported in this browser.");
+      return;
+    }
+
+    try {
+      setError(null);
+      setBusyAction("push");
+
+      const permission = await Notification.requestPermission();
+      setPushPermission(permission);
+      if (permission !== "granted") {
+        throw new Error("Notification permission was not granted.");
+      }
+
+      const vapidResponse = await fetch("/api/notifications/vapid-public-key");
+      const vapidData = (await vapidResponse.json()) as { publicKey?: string; error?: string };
+      if (!vapidResponse.ok || !vapidData.publicKey) {
+        throw new Error(vapidData.error || "Missing VAPID public key.");
+      }
+
+      const registration = await navigator.serviceWorker.register("/sw.js");
+      let subscription = await registration.pushManager.getSubscription();
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(vapidData.publicKey)
+        });
+      }
+
+      const subscribeResponse = await fetch("/api/notifications/subscribe", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(subscription)
+      });
+      const subscribeData = (await subscribeResponse.json()) as { error?: string };
+      if (!subscribeResponse.ok || subscribeData.error) {
+        throw new Error(subscribeData.error || "Unable to enable push reminders.");
+      }
+
+      setPushSubscribed(true);
+      setBanner("Browser reminders enabled.");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Unable to enable push reminders.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleDisablePushNotifications() {
+    try {
+      setError(null);
+      setBusyAction("push");
+
+      const registration = await navigator.serviceWorker.register("/sw.js");
+      const subscription = await registration.pushManager.getSubscription();
+      if (subscription) {
+        await fetch("/api/notifications/unsubscribe", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ endpoint: subscription.endpoint })
+        });
+        await subscription.unsubscribe();
+      }
+
+      setPushSubscribed(false);
+      setBanner("Browser reminders disabled.");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Unable to disable push reminders.");
     } finally {
       setBusyAction(null);
     }
@@ -343,8 +558,15 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
     } as StructuredLog);
   }
 
-  function onFileChange(event: ChangeEvent<HTMLInputElement>, setter: (file: File | null) => void) {
-    setter(event.target.files?.[0] ?? null);
+  function onFileListChange(event: ChangeEvent<HTMLInputElement>, setter: Dispatch<SetStateAction<File[]>>) {
+    const selectedFiles = Array.from(event.target.files ?? []);
+    if (!selectedFiles.length) {
+      return;
+    }
+
+    setter((current) => appendUniqueFiles(current, selectedFiles));
+    // Clear input so selecting the same file again still triggers onChange.
+    event.currentTarget.value = "";
   }
 
   const completionEntry = lastSavedEntry ?? dashboard.todayEntry;
@@ -393,25 +615,35 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
             <p className="eyebrow">Today</p>
             <h2>{dashboard.todayEntry ? "Your day is already captured" : "Log today in under 30 seconds"}</h2>
           </div>
-          <nav className="step-switcher">
-            <button className={step === "home" ? "step-chip active" : "step-chip"} type="button" onClick={() => setStep("home")}>
-              Home
-            </button>
-            <button
-              className={step === "capture" ? "step-chip active" : "step-chip"}
-              type="button"
-              onClick={() => setStep("capture")}
-            >
-              Capture
-            </button>
-            <button
-              className={step === "history" ? "step-chip active" : "step-chip"}
-              type="button"
-              onClick={() => setStep("history")}
-            >
-              History
-            </button>
-          </nav>
+          <div className="workspace-header-actions">
+            <nav className="step-switcher">
+              <button className={step === "home" ? "step-chip active" : "step-chip"} type="button" onClick={() => setStep("home")}>
+                Home
+              </button>
+              <button
+                className={step === "capture" ? "step-chip active" : "step-chip"}
+                type="button"
+                onClick={() => setStep("capture")}
+              >
+                Capture
+              </button>
+              <button
+                className={step === "history" ? "step-chip active" : "step-chip"}
+                type="button"
+                onClick={() => setStep("history")}
+              >
+                History
+              </button>
+            </nav>
+            <form action="/auth/signout" method="post">
+              <button className="ghost-button" type="submit">
+                Sign out
+              </button>
+            </form>
+            <Link className="secondary-button" href="/profile">
+              Profile
+            </Link>
+          </div>
         </header>
 
         {banner ? <div className="banner success">{banner}</div> : null}
@@ -432,7 +664,7 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
               </p>
               <div className="action-row">
                 <button className="primary-button" type="button" onClick={() => setStep("capture")}>
-                  Start today's check-in
+                  Start today&apos;s check-in
                 </button>
                 <button className="secondary-button" type="button" onClick={handleReuseYesterday} disabled={!fallbackYesterdayEntry}>
                   Same as yesterday
@@ -467,7 +699,33 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
                   <button className="secondary-button" type="button" onClick={handleReminderSave} disabled={busyAction === "reminder"}>
                     {busyAction === "reminder" ? "Saving..." : "Save reminder"}
                   </button>
+                  {pushSupported ? (
+                    pushSubscribed ? (
+                      <button className="ghost-button" type="button" onClick={handleDisablePushNotifications} disabled={busyAction === "push"}>
+                        {busyAction === "push" ? "Updating..." : "Disable browser reminders"}
+                      </button>
+                    ) : (
+                      <button className="ghost-button" type="button" onClick={handleEnablePushNotifications} disabled={busyAction === "push"}>
+                        {busyAction === "push" ? "Enabling..." : "Enable browser reminders"}
+                      </button>
+                    )
+                  ) : null}
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={handleSendTestReminder}
+                    disabled={busyAction === "test-reminder"}
+                  >
+                    {busyAction === "test-reminder" ? "Sending..." : "Send test notification"}
+                  </button>
                 </div>
+                {pushSupported ? (
+                  <p className="support-copy">
+                    Browser reminders are {pushSubscribed ? "enabled" : "disabled"} (permission: {pushPermission}).
+                  </p>
+                ) : (
+                  <p className="support-copy">This browser does not support push notifications.</p>
+                )}
               </article>
             </div>
 
@@ -475,7 +733,7 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
               <article className="feature-card">
                 <div className="card-heading">
                   <div>
-                    <p className="eyebrow">Yesterday's baseline</p>
+                    <p className="eyebrow">Yesterday&apos;s baseline</p>
                     <h3>{fallbackYesterdayEntry.structuredLog.summary}</h3>
                   </div>
                   <span className="date-label">{formatDay(fallbackYesterdayEntry.entryDate)}</span>
@@ -521,15 +779,35 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
 
                 <label className="capture-card">
                   <span className="capture-title">Meal photo</span>
-                  <span className="capture-helper">Upload a meal photo and optionally add context.</span>
-                  <input className="file-input" type="file" accept="image/*" onChange={(event) => onFileChange(event, setMealPhoto)} />
+                  <span className="capture-helper">Upload one or more meal photos and optionally add context.</span>
+                  <input
+                    className="file-input"
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={(event) => onFileListChange(event, setMealPhotos)}
+                  />
                   <input
                     className="text-input"
                     value={mealCaption}
                     onChange={(event) => setMealCaption(event.target.value)}
                     placeholder="Optional caption: dinner had paneer and fries"
                   />
-                  {mealPhoto ? <span className="file-pill">{mealPhoto.name}</span> : null}
+                  {mealPhotos.length ? (
+                    <>
+                      <span className="file-pill">{mealPhotos.length} photo(s) selected</span>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                        {mealPhotoPreviews.map((photo) => (
+                          <img
+                            key={photo.key}
+                            src={photo.url}
+                            alt={photo.name}
+                            style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 10, border: "1px solid rgba(34,34,34,0.08)" }}
+                          />
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
                 </label>
 
                 <div className="capture-card">
@@ -539,14 +817,34 @@ export function TrackerApp({ initialData }: TrackerAppProps) {
                 <label className="capture-card">
                   <span className="capture-title">Optional skin selfie</span>
                   <span className="capture-helper">Useful when the skin changed more than the routine did.</span>
-                  <input className="file-input" type="file" accept="image/*" onChange={(event) => onFileChange(event, setSkinSelfie)} />
+                  <input
+                    className="file-input"
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={(event) => onFileListChange(event, setSkinSelfies)}
+                  />
                   <input
                     className="text-input"
                     value={selfieCaption}
                     onChange={(event) => setSelfieCaption(event.target.value)}
                     placeholder="Optional caption: jawline redness looked calmer"
                   />
-                  {skinSelfie ? <span className="file-pill">{skinSelfie.name}</span> : null}
+                  {skinSelfies.length ? (
+                    <>
+                      <span className="file-pill">{skinSelfies.length} selfie(s) selected</span>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                        {skinSelfiePreviews.map((photo) => (
+                          <img
+                            key={photo.key}
+                            src={photo.url}
+                            alt={photo.name}
+                            style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 10, border: "1px solid rgba(34,34,34,0.08)" }}
+                          />
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
                 </label>
               </div>
               <div className="action-row">

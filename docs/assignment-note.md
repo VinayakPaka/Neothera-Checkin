@@ -33,6 +33,7 @@ I prioritized the shortest path from `reminder` to `confirmed log`.
 
 The product includes:
 
+- a branded landing page and auth entry flow
 - a home screen with reminder and progress context
 - a `same as yesterday` shortcut for repeated days
 - multimodal capture

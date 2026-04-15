@@ -1,9 +1,5 @@
-import { TrackerApp } from "@/components/tracker-app";
-import { getDashboardSnapshot } from "@/lib/data-store";
+import { MarketingHome } from "@/components/marketing-home";
 
-export const dynamic = "force-dynamic";
-
-export default async function Page() {
-  const dashboard = await getDashboardSnapshot();
-  return <TrackerApp initialData={dashboard} />;
+export default function Page() {
+  return <MarketingHome />;
 }

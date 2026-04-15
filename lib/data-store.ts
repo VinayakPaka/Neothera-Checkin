@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
-import { demoDashboard, demoEntries, demoProfile, demoReminderPreference } from "@/lib/demo-data";
+import type { AuthenticatedUser } from "@/lib/auth";
+import { demoEntries, demoProfile, demoReminderPreference } from "@/lib/demo-data";
 import { AttachmentPayload, DashboardData, DailyEntry, ReminderPreference, SaveEntryPayload } from "@/lib/types";
 import { isSupabaseConfigured, supabaseAdmin } from "@/lib/supabase";
 
@@ -35,13 +36,13 @@ function calculateStreak(entries: DailyEntry[], fromDate: string) {
   return streak;
 }
 
-function buildDashboard(entries: DailyEntry[], reminderPreference: ReminderPreference): DashboardData {
+function buildDashboard(entries: DailyEntry[], reminderPreference: ReminderPreference, profile = demoProfile): DashboardData {
   const todayDate = new Date().toISOString().slice(0, 10);
   const history = [...entries].sort((a, b) => (a.entryDate < b.entryDate ? 1 : -1));
   const confirmedCount = history.filter((entry) => entry.status === "confirmed").length;
 
   return {
-    profile: demoProfile,
+    profile,
     reminderPreference,
     todayDate,
     history,
@@ -51,6 +52,37 @@ function buildDashboard(entries: DailyEntry[], reminderPreference: ReminderPrefe
     totalLogs: confirmedCount,
     daysUntilInsight: Math.max(0, 5 - confirmedCount)
   };
+}
+
+async function ensureUserScaffold(user: AuthenticatedUser) {
+  if (!supabaseAdmin) {
+    return;
+  }
+
+  await supabaseAdmin.from("profiles").upsert(
+    {
+      id: user.id,
+      email: user.email ?? null,
+      first_name: user.fullName ?? demoProfile.firstName,
+      skin_goal: demoProfile.skinGoal
+    },
+    {
+      onConflict: "id"
+    }
+  );
+
+  await supabaseAdmin.from("reminder_preferences").upsert(
+    {
+      user_id: user.id,
+      preferred_time: demoReminderPreference.preferredTime,
+      channel: "in_app",
+      enabled: true
+    },
+    {
+      onConflict: "user_id",
+      ignoreDuplicates: true
+    }
+  );
 }
 
 function decodeDataUrl(dataUrl: string) {
@@ -94,28 +126,26 @@ async function uploadAttachments(entryId: string, attachments: AttachmentPayload
   return uploads;
 }
 
-export async function getDashboardSnapshot(): Promise<DashboardData> {
-  if (!isSupabaseConfigured || !supabaseAdmin) {
-    return buildDashboard(inMemoryEntries, inMemoryReminder);
+export async function getDashboardSnapshot(user?: AuthenticatedUser): Promise<DashboardData> {
+  if (!isSupabaseConfigured || !supabaseAdmin || !user?.id) {
+    return buildDashboard(inMemoryEntries, inMemoryReminder, demoProfile);
   }
 
+  await ensureUserScaffold(user);
+
   const [{ data: profile }, { data: reminder }, { data: entries }] = await Promise.all([
-    supabaseAdmin.from("profiles").select("id, first_name, skin_goal").eq("id", demoUserId).single(),
-    supabaseAdmin.from("reminder_preferences").select("preferred_time, channel, enabled").eq("user_id", demoUserId).single(),
+    supabaseAdmin.from("profiles").select("id, first_name, skin_goal").eq("id", user.id).single(),
+    supabaseAdmin.from("reminder_preferences").select("preferred_time, channel, enabled").eq("user_id", user.id).single(),
     supabaseAdmin
       .from("daily_entries")
       .select(
         "id, user_id, entry_date, status, raw_text, transcript, structured_log, input_modes, streak_count, created_at, updated_at, entry_attachments(kind, public_url, storage_path)"
       )
-      .eq("user_id", demoUserId)
+      .eq("user_id", user.id)
       .order("entry_date", { ascending: false })
   ]);
 
-  if (!entries) {
-    return demoDashboard();
-  }
-
-  const mappedEntries: DailyEntry[] = entries.map((entry) => ({
+  const mappedEntries: DailyEntry[] = (entries ?? []).map((entry) => ({
     id: entry.id,
     userId: entry.user_id,
     entryDate: entry.entry_date,
@@ -134,29 +164,23 @@ export async function getDashboardSnapshot(): Promise<DashboardData> {
     }))
   }));
 
-  return {
-    profile: {
-      id: profile?.id ?? demoProfile.id,
-      firstName: profile?.first_name ?? demoProfile.firstName,
-      skinGoal: profile?.skin_goal ?? demoProfile.skinGoal
-    },
-    reminderPreference: {
+  return buildDashboard(
+    mappedEntries,
+    {
       preferredTime: reminder?.preferred_time ?? demoReminderPreference.preferredTime,
       channel: reminder?.channel ?? "in_app",
       enabled: reminder?.enabled ?? true
     },
-    todayDate: new Date().toISOString().slice(0, 10),
-    history: mappedEntries,
-    todayEntry: mappedEntries.find((entry) => entry.entryDate === new Date().toISOString().slice(0, 10)),
-    lastEntry: mappedEntries[0],
-    logsThisWeek: countWeeklyLogs(mappedEntries, new Date().toISOString().slice(0, 10)),
-    totalLogs: mappedEntries.length,
-    daysUntilInsight: Math.max(0, 5 - mappedEntries.length)
-  };
+    {
+      id: profile?.id ?? user.id,
+      firstName: profile?.first_name ?? user.fullName ?? demoProfile.firstName,
+      skinGoal: profile?.skin_goal ?? demoProfile.skinGoal
+    }
+  );
 }
 
-export async function saveEntry(payload: SaveEntryPayload): Promise<DashboardData> {
-  if (!isSupabaseConfigured || !supabaseAdmin) {
+export async function saveEntry(payload: SaveEntryPayload, user?: AuthenticatedUser): Promise<DashboardData> {
+  if (!isSupabaseConfigured || !supabaseAdmin || !user?.id) {
     const existingIndex = inMemoryEntries.findIndex((entry) => entry.entryDate === payload.entryDate);
     const draftEntry: DailyEntry = {
       id: existingIndex > -1 ? inMemoryEntries[existingIndex].id : randomUUID(),
@@ -194,24 +218,28 @@ export async function saveEntry(payload: SaveEntryPayload): Promise<DashboardDat
     return buildDashboard(inMemoryEntries, inMemoryReminder);
   }
 
+  await ensureUserScaffold(user);
+
   const existingEntryLookup = await supabaseAdmin
     .from("daily_entries")
     .select("id")
-    .eq("user_id", demoUserId)
+    .eq("user_id", user.id)
     .eq("entry_date", payload.entryDate)
     .maybeSingle();
 
   const entryId = existingEntryLookup.data?.id ?? randomUUID();
   const uploads = await uploadAttachments(entryId, payload.attachments);
+  // Ensure JSON-serializable payload for Postgres jsonb (strips undefined, non-JSON values).
+  const structuredLogJson = JSON.parse(JSON.stringify(payload.structuredLog)) as SaveEntryPayload["structuredLog"];
   const { error } = await supabaseAdmin.from("daily_entries").upsert(
     {
       id: entryId,
-      user_id: demoUserId,
+      user_id: user.id,
       entry_date: payload.entryDate,
       status: "confirmed",
       raw_text: payload.rawText,
       transcript: payload.transcript,
-      structured_log: payload.structuredLog,
+      structured_log: structuredLogJson,
       input_modes: payload.inputModes,
       streak_count: 0
     },
@@ -236,24 +264,26 @@ export async function saveEntry(payload: SaveEntryPayload): Promise<DashboardDat
     );
   }
 
-  const dashboard = await getDashboardSnapshot();
+  const dashboard = await getDashboardSnapshot(user);
   const streak = calculateStreak(dashboard.history, payload.entryDate);
-  await supabaseAdmin.from("daily_entries").update({ streak_count: streak }).eq("user_id", demoUserId).eq("entry_date", payload.entryDate);
-  return getDashboardSnapshot();
+  await supabaseAdmin.from("daily_entries").update({ streak_count: streak }).eq("user_id", user.id).eq("entry_date", payload.entryDate);
+  return getDashboardSnapshot(user);
 }
 
-export async function updateReminder(preferredTime: string): Promise<DashboardData> {
-  if (!isSupabaseConfigured || !supabaseAdmin) {
+export async function updateReminder(preferredTime: string, user?: AuthenticatedUser): Promise<DashboardData> {
+  if (!isSupabaseConfigured || !supabaseAdmin || !user?.id) {
     inMemoryReminder = {
       ...inMemoryReminder,
       preferredTime
     };
-    return buildDashboard(inMemoryEntries, inMemoryReminder);
+    return buildDashboard(inMemoryEntries, inMemoryReminder, demoProfile);
   }
+
+  await ensureUserScaffold(user);
 
   await supabaseAdmin.from("reminder_preferences").upsert(
     {
-      user_id: demoUserId,
+      user_id: user.id,
       preferred_time: preferredTime,
       channel: "in_app",
       enabled: true
@@ -263,5 +293,5 @@ export async function updateReminder(preferredTime: string): Promise<DashboardDa
     }
   );
 
-  return getDashboardSnapshot();
+  return getDashboardSnapshot(user);
 }
